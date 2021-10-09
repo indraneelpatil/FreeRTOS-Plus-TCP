@@ -42,10 +42,16 @@
 #include "FreeRTOS_IP_Private.h"
 #include "NetworkBufferManagement.h"
 #include "phyHandling.h"
+#include "NetworkInterface.h"
 
 /* Moonranger includes */
 #include "system_init.h"
 
+
+
+/*********************************************************************/
+/*                      FreeRTOS+TCP functions                       */
+/*********************************************************************/
 
 /* If ipconfigETHERNET_DRIVER_FILTERS_FRAME_TYPES is set to 1, then the Ethernet
  * driver will filter incoming packets and only pass the stack those packets it
@@ -57,9 +63,45 @@
 #endif
 
 TaskHandle_t xLanderUARTTaskHandle = NULL;
+UARTtransferStatus xLanderUARTTransferStatus = done_uart;
+
+
+/* 1536 bytes is more than needed, 1524 would be enough.
+ * But 1536 is a multiple of 32, which gives a great alignment for cached memories. */
+#define NETWORK_BUFFER_SIZE    1536 // Max packet size
+static uint8_t ucBuffers[ ipconfigNUM_NETWORK_BUFFER_DESCRIPTORS ][ NETWORK_BUFFER_SIZE ];
+
+
+
+BaseType_t xGetPhyLinkStatus( void )
+{
+    // Check transfer status
+    if(xLanderUARTTransferStatus!=done_uart && xLanderUARTTransferStatus !=pending_uart)
+    {
+    
+        printf("Lander comm transfer status in error %d \n",xLanderUARTTransferStatus);
+        return pdFALSE;
+    }
+
+    // Check physical status
+    UARTdriverState write_state = UART_getDriverState(LANDER_COMM_UART,write_uartDir) ;
+    UARTdriverState read_state = UART_getDriverState(LANDER_COMM_UART,read_uartDir); 
+    if( (write_state == uninitialized_uartState || write_state ==  error_uartState) &&
+         (read_state == uninitialized_uartState || read_state ==  error_uartState))
+    {
+    
+        printf("Lander comm link status down read: %d write %d\n",read_state,write_state);
+        return pdFALSE;
+    }
+
+    return pdTRUE;
+}
 
 BaseType_t xNetworkInterfaceInitialise( void )
 {
+    if(xGetPhyLinkStatus()==pdFALSE)
+        return pdFAIL;
+
     if(xLanderUARTTaskHandle == NULL)
     {
         /* Create event handler task */
@@ -77,21 +119,51 @@ BaseType_t xNetworkInterfaceInitialise( void )
 BaseType_t xNetworkInterfaceOutput( NetworkBufferDescriptor_t * const pxNetworkBuffer,
                                     BaseType_t xReleaseAfterSend )
 {
-    /* FIX ME. */
-    return pdFALSE;
+    if( bPHYGetLinkStatus() )
+    {
+        // checksum ??
+
+        // slip ??
+
+        // Async write
+        UARTgenericTransfer transmit_transfer = {.bus = LANDER_COMM_UART, 
+                                                .direction = write_uartDir,
+                                                .writeData = pxNetworkBuffer->pucEthernetBuffer
+                                                .writeSize = pxDescriptor->xDataLength
+                                                .result = &xLanderUARTTransferStatus};
+        UART_queueTransfer(&transmit_transfer);
+
+        /* Call the standard trace macro to log the send event. */
+        iptraceNETWORK_INTERFACE_TRANSMIT();
+    }
+
+
+    if( xReleaseAfterSend != pdFALSE )
+    {
+        /* It is assumed SendData() copies the data out of the FreeRTOS+TCP Ethernet
+         * buffer.  The Ethernet buffer is therefore no longer needed, and must be
+         * freed for re-use. */
+        vReleaseNetworkBufferAndDescriptor( pxNetworkBuffer );
+    }
+
+    return pdTRUE;
 }
 
 void vNetworkInterfaceAllocateRAMToBuffers( NetworkBufferDescriptor_t pxNetworkBuffers[ ipconfigNUM_NETWORK_BUFFER_DESCRIPTORS ] )
 {
-    /* FIX ME. */
-}
+    BaseType_t x;
 
-BaseType_t xGetPhyLinkStatus( void )
-{
-    /* FIX ME. */
-    return pdFALSE;
-}
+    for( x = 0; x < ipconfigNUM_NETWORK_BUFFER_DESCRIPTORS; x++ )
+    {
+        /* pucEthernetBuffer is set to point ipBUFFER_PADDING bytes in from the
+            * beginning of the allocated buffer. */
+        pxNetworkBuffers[ x ].pucEthernetBuffer = &( ucBuffers[ x ][ ipBUFFER_PADDING ] );
 
+        /* The following line is also required, but will not be required in
+            * future versions. */
+        *( ( uint32_t * ) &ucBuffers[ x ][ 0 ] ) = ( uint32_t ) &( pxNetworkBuffers[ x ] );
+    }
+}
 
 static void prvLanderUARTHandlerTask( void * pvParameters )
 {
