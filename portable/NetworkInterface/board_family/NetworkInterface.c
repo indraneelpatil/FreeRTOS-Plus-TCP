@@ -46,6 +46,7 @@
 
 /* Moonranger includes */
 #include "system_init.h"
+#include "slip.h"
 
 
 
@@ -123,13 +124,15 @@ BaseType_t xNetworkInterfaceOutput( NetworkBufferDescriptor_t * const pxNetworkB
     {
         // checksum ??
 
-        // slip ??
+        // slip 
+        unsigned char encodeBuffer[NETWORK_BUFFER_SIZE];
+        int toSendLength = slip_encode(&encodeBuffer[0],pxNetworkBuffer->xDataLength,pxNetworkBuffer->pucEthernetBuffer);
 
         // Async write
         UARTgenericTransfer transmit_transfer = {.bus = LANDER_COMM_UART, 
                                                 .direction = write_uartDir,
-                                                .writeData = pxNetworkBuffer->pucEthernetBuffer
-                                                .writeSize = pxDescriptor->xDataLength
+                                                .writeData = pxNetworkBuffer->pucEthernetBuffer,
+                                                .writeSize = toSendLength,
                                                 .result = &xLanderUARTTransferStatus};
         UART_queueTransfer(&transmit_transfer);
 
@@ -168,7 +171,8 @@ void vNetworkInterfaceAllocateRAMToBuffers( NetworkBufferDescriptor_t pxNetworkB
 static void prvLanderUARTHandlerTask( void * pvParameters )
 {
     int retValInt = 0;
-    static unsigned char readData[1];
+    static unsigned char readData;
+    static unsigned char decodeBuffer[NETWORK_BUFFER_SIZE];
     NetworkBufferDescriptor_t * pxBufferDescriptor;
     size_t xBytesReceived = 0, xBytesRead = 0;
 
@@ -185,14 +189,21 @@ static void prvLanderUARTHandlerTask( void * pvParameters )
         /* Wait for new data on UART */
         retValInt = UART_read(LANDER_COMM_UART, &readData, 1);
 		if(retValInt != 0) {
-			TRACE_WARNING("\n\r taskUARTtest: UART_read returned: %d for bus %d \n\r", retValInt, LANDER_COMM_UART);
+			TRACE_WARNING("\n\r prvLanderUARTHandlerTask: UART_read returned: %d for bus %d \n\r", retValInt, LANDER_COMM_UART);
+            printf("\n\r prvLanderUARTHandlerTask: UART_read returned: %d for bus %d \n\r", retValInt, LANDER_COMM_UART);
 		}
-		printf("Read Counter Value is %d \n", (unsigned int) readData);
+		
+        // check if read buffer is full
+        if(xBytesReceived+1>NETWORK_BUFFER_SIZE)
+        {
+            xBytesReceived = 0;
+            printf("\n\r prvLanderUARTHandlerTask: Read buffer full!! Resetting buffer ");
+        }
+        decodeBuffer[xBytesReceived++] = readData;
 
-        // How many bytes were read
-        xBytesReceived = 1;
 
-        if(xBytesReceived > 0)
+        // Check for end of packet or wait for the end
+        if(readData == SLIP_END && xBytesReceived>1)
         {
             /* Allocate a network buffer descriptor that points to a buffer
             * large enough to hold the received frame.  As this is the simple
@@ -203,12 +214,10 @@ static void prvLanderUARTHandlerTask( void * pvParameters )
             if( pxBufferDescriptor != NULL )
             {
                 // Transfer data to ethernet buffer
-                for(int i=0;i<xBytesReceived;i++)
-                    readData[i] = pxBufferDescriptor->pucEthernetBuffer+i;
-                pxBufferDescriptor->xDataLength = xBytesReceived;
-                
-                // Slip decoding??
+                pxBufferDescriptor->xDataLength = slip_read_packet(&decodeBuffer[0], pxBufferDescriptor->pucEthernetBuffer,xBytesReceived);
 
+                // Clear decode buffer after decoding
+                xBytesReceived = 0;
 
                 // Checksum ??
 
@@ -254,10 +263,6 @@ static void prvLanderUARTHandlerTask( void * pvParameters )
                 * Call the standard trace macro to log the occurrence. */
                 iptraceETHERNET_RX_EVENT_LOST();
             }
-        }
-        else
-        {
-            printf("UART exited with no real data!! \n");
         }
     }
 
