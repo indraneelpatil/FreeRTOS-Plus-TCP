@@ -48,6 +48,14 @@
 #include "system_init.h"
 #include "slip.h"
 
+TaskHandle_t xLanderUARTTaskHandle = NULL;
+UARTtransferStatus xLanderUARTTransferStatus = done_uart;
+
+
+/* 1536 bytes is more than needed, 1524 would be enough.
+ * But 1536 is a multiple of 32, which gives a great alignment for cached memories. */
+#define NETWORK_BUFFER_SIZE    1536 // Max packet size
+static uint8_t ucBuffers[ ipconfigNUM_NETWORK_BUFFER_DESCRIPTORS ][ NETWORK_BUFFER_SIZE ];
 
 
 /*********************************************************************/
@@ -63,15 +71,11 @@
     #define ipCONSIDER_FRAME_FOR_PROCESSING( pucEthernetBuffer )    eConsiderFrameForProcessing( ( pucEthernetBuffer ) )
 #endif
 
-TaskHandle_t xLanderUARTTaskHandle = NULL;
-UARTtransferStatus xLanderUARTTransferStatus = done_uart;
 
-
-/* 1536 bytes is more than needed, 1524 would be enough.
- * But 1536 is a multiple of 32, which gives a great alignment for cached memories. */
-#define NETWORK_BUFFER_SIZE    1536 // Max packet size
-static uint8_t ucBuffers[ ipconfigNUM_NETWORK_BUFFER_DESCRIPTORS ][ NETWORK_BUFFER_SIZE ];
-
+/*
+ * A interrupt handler task that processes UART interrupts.
+ */
+static void prvLanderUARTHandlerTask( void * pvParameters );
 
 
 BaseType_t xGetPhyLinkStatus( void )
@@ -120,7 +124,7 @@ BaseType_t xNetworkInterfaceInitialise( void )
 BaseType_t xNetworkInterfaceOutput( NetworkBufferDescriptor_t * const pxNetworkBuffer,
                                     BaseType_t xReleaseAfterSend )
 {
-    if( bPHYGetLinkStatus() )
+    if( xGetPhyLinkStatus() )
     {
         // checksum ??
 
@@ -176,7 +180,6 @@ static void prvLanderUARTHandlerTask( void * pvParameters )
     NetworkBufferDescriptor_t * pxBufferDescriptor;
     size_t xBytesReceived = 0, xBytesRead = 0;
 
-    uint16_t xICMPChecksumResult = ipCORRECT_CRC;
     const IPPacket_t * pxIPPacket;
 
 
@@ -221,8 +224,7 @@ static void prvLanderUARTHandlerTask( void * pvParameters )
 
                 // Checksum ??
 
-                if( ( ipCONSIDER_FRAME_FOR_PROCESSING( pxBufferDescriptor->pucEthernetBuffer ) == eProcessBuffer ) &&
-                    ( xICMPChecksumResult == ipCORRECT_CRC ) )
+                if( ( ipCONSIDER_FRAME_FOR_PROCESSING( pxBufferDescriptor->pucEthernetBuffer ) == eProcessBuffer ) )
                 {
                     /* The event about to be sent to the TCP/IP is an Rx event. */
                     xRxEvent.eEventType = eNetworkRxEvent;
@@ -266,4 +268,69 @@ static void prvLanderUARTHandlerTask( void * pvParameters )
         }
     }
 
+}
+
+BaseType_t xApplicationGetRandomNumber( uint32_t * pulNumber )
+
+{
+
+    *pulNumber = rand();
+    return pdTRUE;
+}
+
+uint32_t ulApplicationGetNextSequenceNumber( uint32_t ulSourceAddress,
+                                                        uint16_t usSourcePort,
+                                                        uint32_t ulDestinationAddress,
+                                                        uint16_t usDestinationPort )
+{
+    return rand();
+}
+
+/* Called by FreeRTOS+TCP when the network connects or disconnects.  Disconnect
+ * events are only received if implemented in the MAC driver. */
+void vApplicationIPNetworkEventHook( eIPCallbackEvent_t eNetworkEvent )
+{
+    uint32_t ulIPAddress, ulNetMask, ulGatewayAddress, ulDNSServerAddress;
+    char cBuffer[ 16 ];
+    static BaseType_t xTasksAlreadyCreated = pdFALSE;
+
+    /* If the network has just come up...*/
+    if( eNetworkEvent == eNetworkUp )
+    {
+        /* Create the tasks that use the IP stack if they have not already been
+         * created. */
+        if( xTasksAlreadyCreated == pdFALSE )
+        {
+            /* See the comments above the definitions of these pre-processor
+             * macros at the top of this file for a description of the individual
+             * demo tasks. */
+
+            #if ( mainCREATE_TCP_ECHO_TASKS_SINGLE == 1 )
+                {
+                    vStartTCPEchoClientTasks_SingleTasks( mainECHO_CLIENT_TASK_STACK_SIZE, mainECHO_CLIENT_TASK_PRIORITY );
+                }
+            #endif /* mainCREATE_TCP_ECHO_TASKS_SINGLE */
+
+            xTasksAlreadyCreated = pdTRUE;
+        }
+
+        /* Print out the network configuration, which may have come from a DHCP
+         * server. */
+        FreeRTOS_GetAddressConfiguration( &ulIPAddress, &ulNetMask, &ulGatewayAddress, &ulDNSServerAddress );
+        FreeRTOS_inet_ntoa( ulIPAddress, cBuffer );
+        FreeRTOS_printf( ( "\r\n\r\nIP Address: %s\r\n", cBuffer ) );
+
+        FreeRTOS_inet_ntoa( ulNetMask, cBuffer );
+        FreeRTOS_printf( ( "Subnet Mask: %s\r\n", cBuffer ) );
+
+        FreeRTOS_inet_ntoa( ulGatewayAddress, cBuffer );
+        FreeRTOS_printf( ( "Gateway Address: %s\r\n", cBuffer ) );
+
+        FreeRTOS_inet_ntoa( ulDNSServerAddress, cBuffer );
+        FreeRTOS_printf( ( "DNS Server Address: %s\r\n\r\n\r\n", cBuffer ) );
+    }
+    else
+    {
+        FreeRTOS_printf( "Application idle hook network down\n" );
+    }
 }
